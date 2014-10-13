@@ -26,7 +26,49 @@ import error
 from yieldfrom.http import client
 
 sys.path.insert(0, '.')
-#import test_urllib
+import testtcpserver as server
+from testtcpserver import RECEIVE, TestingSocket
+
+CONNECT = ('127.0.0.1', 2222)
+testLoop = asyncio.get_event_loop()
+
+def open_socket_conn(host='127.0.0.1', port=2222):
+    """  """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    sock.connect((host, port))
+    return sock
+
+def _prep_server(body, prime=False, reader=None):
+    commands = []
+    if type(body) == type([]):
+        commands.extend(body)
+    else:
+        commands.extend([RECEIVE, body])
+    srvr = server.AsyncioCommandServer(commands, testLoop if reader else None, reader, *CONNECT, verbose=False)
+    if prime:
+        sock = open_socket_conn(*CONNECT)
+        sock.sendall(b' ')
+        return srvr, sock
+    else:
+        return srvr, None
+
+def _run_with_server_pre(f, body='', srvr=None, sock=None):
+    try:
+        if srvr is None:
+            srvr, sock = _prep_server(body, prime=True)
+        testLoop.run_until_complete(f(sock))
+    except:
+        raise
+    finally:
+        srvr.stop()
+
+def _run_with_server(f, body='', srvr=None):
+    if srvr is None:
+        srvr, _j = _prep_server(body)
+    testLoop.run_until_complete(f(*CONNECT))
+    srvr.stop()
+
 
 def async_test(f):
 
@@ -271,10 +313,16 @@ class RequestHdrsTests(unittest.TestCase):
 
 class MockOpener:
     addheaders = []
+    @asyncio.coroutine
     def open(self, req, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT):
+        yield None # make generator
         self.req, self.data, self.timeout = req, data, timeout
+        return None
+    @asyncio.coroutine
     def error(self, proto, *args):
+        yield None
         self.proto, self.args = proto, args
+        return None
 
 class MockFile:
     def read(self, count=None): pass
@@ -351,7 +399,9 @@ class MockHTTPClass:
         else:
             self._tunnel_headers.clear()
 
+    @asyncio.coroutine
     def request(self, method, url, body=None, headers=None):
+        yield None # make generator
         self.method = method
         self.selector = url
         if headers is not None:
@@ -361,7 +411,10 @@ class MockHTTPClass:
             self.data = body
         if self.raise_on_endheaders:
             raise OSError()
+
+    @asyncio.coroutine
     def getresponse(self):
+        yield None
         return MockHTTPResponse(MockFile(), {}, 200, "OK")
 
     def close(self):
@@ -459,15 +512,18 @@ class MockHTTPHandler(request.BaseHandler):
     def reset(self):
         self._count = 0
         self.requests = []
+    @asyncio.coroutine
     def http_open(self, req):
         import email, copy
+        yield None # make this a generator
         self.requests.append(copy.deepcopy(req))
         if self._count == 0:
             self._count = self._count + 1
             name = client.responses[self.code]
             msg = email.message_from_string(self.headers)
-            return self.parent.error(
+            _r = yield from self.parent.error(
                 "http", req, MockFile(), self.code, name, msg)
+            return _r
         else:
             self.req = req
             msg = email.message_from_string("\r\n\r\n")
@@ -594,7 +650,12 @@ class OpenerDirectorTests(unittest.TestCase):
         handlers = add_ordered_mock_handlers(o, meth_spec)
 
         req = Request("http://example.com/")
-        self.aioAssertRaises(error.URLError, o.open, req)
+        try:
+            yield from o.open(req)
+        except error.URLError as e:
+            pass
+        else:
+            self.fail('expected Exception not raised.')
         self.assertEqual(o.calls, [(handlers[0], "http_open", (req,), {})])
 
     @async_test
@@ -684,6 +745,7 @@ class HandlerTests(unittest.TestCase):
         else:
             raise Exception('expected %s not raised' % exc.__name__)
 
+    @asyncio.coroutine
     def test_ftp(self):
         class MockFTPWrapper:
             def __init__(self, data): self.data = data
@@ -729,7 +791,7 @@ class HandlerTests(unittest.TestCase):
             ]:
             req = Request(url)
             req.timeout = None
-            r = h.ftp_open(req)
+            r = yield from h.ftp_open(req)
             # ftp authentication not yet implemented by FTPHandler
             self.assertEqual(h.user, user)
             self.assertEqual(h.passwd, passwd)
@@ -742,6 +804,7 @@ class HandlerTests(unittest.TestCase):
             self.assertEqual(headers.get("Content-type"), mimetype)
             self.assertEqual(int(headers["Content-length"]), len(data))
 
+    @async_test
     def test_file(self):
         import email.utils
         h = request.FileHandler()
@@ -803,7 +866,7 @@ class HandlerTests(unittest.TestCase):
                 finally:
                     f.close()
 
-                self.assertRaises(error.URLError,
+                self.aioAssertRaises(error.URLError,
                                   h.file_open, Request(url))
             finally:
                 os.remove(TESTFN)
@@ -827,7 +890,7 @@ class HandlerTests(unittest.TestCase):
             ]:
             req = Request(url)
             try:
-                h.file_open(req)
+                yield from h.file_open(req)
             # XXXX remove OSError when bug fixed
             except (error.URLError, OSError):
                 self.assertFalse(ftp)
@@ -880,7 +943,7 @@ class HandlerTests(unittest.TestCase):
         for data in b"", None:  # POST, GET
             req = Request("http://example.com/", data)
             r = MockResponse(200, "OK", {}, "")
-            newreq = yield from h.do_request_(req)
+            newreq = h.do_request_(req)
             if data is None:  # GET
                 self.assertNotIn("Content-length", req.unredirected_hdrs)
                 self.assertNotIn("Content-type", req.unredirected_hdrs)
@@ -897,7 +960,7 @@ class HandlerTests(unittest.TestCase):
             req.add_unredirected_header("Content-type", "bar")
             req.add_unredirected_header("Host", "baz")
             req.add_unredirected_header("Spam", "foo")
-            newreq = yield from h.do_request_(req)
+            newreq = h.do_request_(req)
             self.assertEqual(req.unredirected_hdrs["Content-length"], "foo")
             self.assertEqual(req.unredirected_hdrs["Content-type"], "bar")
             self.assertEqual(req.unredirected_hdrs["Host"], "baz")
@@ -1022,6 +1085,7 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(newreq.selector,'')
 
 
+    @async_test
     def test_errors(self):
         h = request.HTTPErrorProcessor()
         o = h.parent = MockOpener()
@@ -1030,23 +1094,25 @@ class HandlerTests(unittest.TestCase):
         req = Request(url)
         # all 2xx are passed through
         r = MockResponse(200, "OK", {}, "", url)
-        newr = h.http_response(req, r)
+        newr = yield from h.http_response(req, r)
         self.assertIs(r, newr)
         self.assertFalse(hasattr(o, "proto"))  # o.error not called
         r = MockResponse(202, "Accepted", {}, "", url)
-        newr = h.http_response(req, r)
+        newr = yield from h.http_response(req, r)
         self.assertIs(r, newr)
         self.assertFalse(hasattr(o, "proto"))  # o.error not called
         r = MockResponse(206, "Partial content", {}, "", url)
-        newr = h.http_response(req, r)
+        newr = yield from h.http_response(req, r)
         self.assertIs(r, newr)
         self.assertFalse(hasattr(o, "proto"))  # o.error not called
         # anything else calls o.error (and MockOpener returns None, here)
         r = MockResponse(502, "Bad gateway", {}, "", url)
-        self.assertIsNone(h.http_response(req, r))
+        _hr = yield from h.http_response(req, r)
+        self.assertIsNone(_hr)
         self.assertEqual(o.proto, "http")  # o.error called
         self.assertEqual(o.args, (req, r, 502, "Bad gateway", {}))
 
+    @async_test
     def test_cookies(self):
         cj = MockCookieJar()
         h = request.HTTPCookieProcessor(cj)
@@ -1059,11 +1125,12 @@ class HandlerTests(unittest.TestCase):
         self.assertIs(cj.ach_req, newreq)
         self.assertEqual(req.origin_req_host, "example.com")
         self.assertFalse(req.unverifiable)
-        newr = h.http_response(req, r)
+        newr = yield from h.http_response(req, r)
         self.assertIs(cj.ec_req, req)
         self.assertIs(cj.ec_r, r)
         self.assertIs(r, newr)
 
+    @async_test
     def test_redirect(self):
         from_url = "http://example.com/a.html"
         to_url = "http://example.com/b.html"
@@ -1081,7 +1148,7 @@ class HandlerTests(unittest.TestCase):
                     req.add_header("Content-Length", str(len(data)))
                 req.add_unredirected_header("Spam", "spam")
                 try:
-                    method(req, MockFile(), code, "Blah",
+                    yield from method(req, MockFile(), code, "Blah",
                            MockHeaders({"location": to_url}))
                 except error.HTTPError:
                     # 307 in response to POST requires user OK
@@ -1107,8 +1174,9 @@ class HandlerTests(unittest.TestCase):
         # loop detection
         req = Request(from_url)
         req.timeout = socket._GLOBAL_DEFAULT_TIMEOUT
+        @asyncio.coroutine
         def redirect(h, req, url=to_url):
-            h.http_error_302(req, MockFile(), 302, "Blah",
+            yield from h.http_error_302(req, MockFile(), 302, "Blah",
                              MockHeaders({"location": url}))
         # Note that the *original* request shares the same record of
         # redirections with the sub-requests caused by the redirections.
@@ -1119,7 +1187,7 @@ class HandlerTests(unittest.TestCase):
         req.timeout = socket._GLOBAL_DEFAULT_TIMEOUT
         try:
             while 1:
-                redirect(h, req, "http://example.com/")
+                yield from redirect(h, req, "http://example.com/")
                 count = count + 1
         except error.HTTPError:
             # don't stop until max_repeats, because cookies may introduce state
@@ -1131,13 +1199,13 @@ class HandlerTests(unittest.TestCase):
         req.timeout = socket._GLOBAL_DEFAULT_TIMEOUT
         try:
             while 1:
-                redirect(h, req, "http://example.com/%d" % count)
+                yield from redirect(h, req, "http://example.com/%d" % count)
                 count = count + 1
         except error.HTTPError:
             self.assertEqual(count,
                              request.HTTPRedirectHandler.max_redirections)
 
-
+    @async_test
     def test_invalid_redirect(self):
         from_url = "http://example.com/a.html"
         valid_schemes = ['http','https','ftp']
@@ -1150,16 +1218,17 @@ class HandlerTests(unittest.TestCase):
 
         for scheme in invalid_schemes:
             invalid_url = scheme + '://' + schemeless_url
-            self.assertRaises(error.HTTPError, h.http_error_302,
+            self.aioAssertRaises(error.HTTPError, h.http_error_302,
                     req, MockFile(), 302, "Security Loophole",
                     MockHeaders({"location": invalid_url}))
 
         for scheme in valid_schemes:
             valid_url = scheme + '://' + schemeless_url
-            h.http_error_302(req, MockFile(), 302, "That's fine",
+            yield from h.http_error_302(req, MockFile(), 302, "That's fine",
                 MockHeaders({"location": valid_url}))
             self.assertEqual(o.req.get_full_url(), valid_url)
 
+    @async_test
     def test_relative_redirect(self):
         from_url = "http://example.com/a.html"
         relative_url = "/b.html"
@@ -1169,7 +1238,7 @@ class HandlerTests(unittest.TestCase):
         req.timeout = socket._GLOBAL_DEFAULT_TIMEOUT
 
         valid_url = urljoin(from_url,relative_url)
-        h.http_error_302(req, MockFile(), 302, "That's fine",
+        yield from h.http_error_302(req, MockFile(), 302, "That's fine",
             MockHeaders({"location": valid_url}))
         self.assertEqual(o.req.get_full_url(), valid_url)
 
@@ -1380,15 +1449,15 @@ class HandlerTests(unittest.TestCase):
             def record(self, info):
                 self.recorded.append(info)
         class TestDigestAuthHandler(request.HTTPDigestAuthHandler):
+            @asyncio.coroutine
             def http_error_401(self, *args, **kwds):
                 self.parent.record("digest")
-                request.HTTPDigestAuthHandler.http_error_401(self,
-                                                             *args, **kwds)
+                yield from request.HTTPDigestAuthHandler.http_error_401(self, *args, **kwds)
         class TestBasicAuthHandler(request.HTTPBasicAuthHandler):
+            @asyncio.coroutine
             def http_error_401(self, *args, **kwds):
                 self.parent.record("basic")
-                request.HTTPBasicAuthHandler.http_error_401(self,
-                                                            *args, **kwds)
+                yield from request.HTTPBasicAuthHandler.http_error_401(self, *args, **kwds)
 
         opener = RecordingOpenerDirector()
         password_manager = MockPasswordManager()
@@ -1469,32 +1538,62 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(len(http_handler.requests), 1)
         self.assertFalse(http_handler.requests[0].has_header(auth_header))
 
-    def test_http_closed(self):
+    def tst_http_closed(self):
         """Test the connection is cleaned up when the response is closed"""
+        #    conn = test_urllib.fakehttp(header.encode() + data)
+
         for (transfer, data) in (
             ("Connection: close", b"data"),
             ("Transfer-Encoding: chunked", b"4\r\ndata\r\n0\r\n\r\n"),
             ("Content-Length: 4", b"data"),
         ):
             header = "HTTP/1.1 200 OK\r\n{}\r\n\r\n".format(transfer)
-            conn = test_urllib.fakehttp(header.encode() + data)
-            handler = request.AbstractHTTPHandler()
-            req = Request("http://dummy/")
-            req.timeout = None
-            with handler.do_open(conn, req) as resp:
-                resp.read()
-            self.assertTrue(conn.fakesock.closed,
-                "Connection not closed with {!r}".format(transfer))
+            def run(host, port):
+                #conn = test_urllib.fakehttp(b"")
+                _cs = None
+                def conn(*args, **kwargs):
+                    nonlocal _cs
+                    _cs = c = client.HTTPConnection(*args, **kwargs)
+                    sock = open_socket_conn(host, port)
+                    c.sock = server.TestingSocket(sock=sock)
+                    return c
+                handler = request.AbstractHTTPHandler()
+                req = Request('http://%s:%s' % (host, port))
+                req.timeout = None
+                resp = yield from handler.do_open(conn, req)
+                yield from resp.read()
+                self.assertTrue(_cs.sock is None,
+                    "Connection not closed with {!r}".format(transfer))
 
-    def test_invalid_closed(self):
+            _run_with_server(run, header.encode()+data)
+
+
+    def tst_invalid_closed(self):
         """Test the connection is cleaned up after an invalid response"""
-        conn = test_urllib.fakehttp(b"")
-        handler = request.AbstractHTTPHandler()
-        req = Request("http://dummy/")
-        req.timeout = None
-        with self.assertRaises(client.BadStatusLine):
-            handler.do_open(conn, req)
-        self.assertTrue(conn.fakesock.closed, "Connection not closed")
+
+        def run(host, port):
+            #conn = test_urllib.fakehttp(b"")
+            _cs = None
+            def conn(*args, **kwargs):
+                nonlocal _cs
+                _cs = c = client.HTTPConnection(*args, **kwargs)
+                sock = open_socket_conn(host, port)
+                c.sock = server.TestingSocket(sock=sock)
+                #c.sock = server.TestingSocket(sock=c.sock)
+                return c
+            handler = request.AbstractHTTPHandler()
+            req = Request('http://%s:%s' % (host, port))
+            req.timeout = None
+            try:
+                r = yield from handler.do_open(conn, req)
+            except (client.BadStatusLine, error.URLError) as e:
+                pass
+            else:
+                self.fail('Expected exception not caught')
+
+            self.assertTrue(_cs.sock is None, "Connection not closed")
+
+        _run_with_server(run, b'')
 
 
 class MiscTests(unittest.TestCase):

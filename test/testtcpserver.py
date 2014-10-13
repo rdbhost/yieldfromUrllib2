@@ -15,7 +15,7 @@ import time
 PY3 = sys.version > '3'
 
 
-class FauxSocket(socket.socket):
+class TestingSocket(socket.socket):
     """subclass of a true socket"""
 
     def __init__(self, family=socket.AF_INET, type=socket.SOCK_STREAM, sock=None, host=None, port=None, *args, **kwargs):
@@ -27,11 +27,11 @@ class FauxSocket(socket.socket):
         self.host = host
         self.port = port
         if sock is not None:
-            super(FauxSocket, self).__init__(family=sock.family, type=sock.type, proto=sock.proto, fileno=sock.fileno())
+            super(TestingSocket, self).__init__(family=sock.family, type=sock.type, proto=sock.proto, fileno=sock.fileno())
             self.settimeout(sock.gettimeout())
             sock.detach()
         else:
-            super(FauxSocket, self).__init__(family, type, *args, **kwargs)
+            super(TestingSocket, self).__init__(family, type, *args, **kwargs)
 
     def sendall(self, data):
         self._data['sendall_calls'] += 1
@@ -268,4 +268,3 @@ class OneShotServer(CommandServer):
             self.server(self.s, connection, count)
             count += 1
         self.stop()
-

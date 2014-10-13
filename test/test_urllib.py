@@ -360,7 +360,7 @@ class urlopen_HttpTests(unittest.TestCase): #, FakeHTTPMixin, FakeFTPMixin):
         self.assertEqual(fp.geturl(), url)
 
     @async_test
-    def tst_willclose(self):
+    def test_willclose(self):
         resp = yield from urlopen("http://www.httpbin.org")
         self.assertTrue(resp.fp.will_close)
 

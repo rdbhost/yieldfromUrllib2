@@ -98,6 +98,7 @@ import collections
 import tempfile
 import contextlib
 import warnings
+import inspect
 import asyncio
 
 from yieldfrom.http import client
@@ -443,6 +444,7 @@ class OpenerDirector:
         # Only exists for backwards compatibility.
         pass
 
+    @asyncio.coroutine
     def _call_chain(self, chain, kind, meth_name, *args):
         # Handlers raise an exception if no one else should try to handle
         # the request, or return None if they can't but another handler
@@ -451,6 +453,8 @@ class OpenerDirector:
         for handler in handlers:
             func = getattr(handler, meth_name)
             result = func(*args)
+            if inspect.isgenerator(result):
+                result = yield from result
             if result is not None:
                 return result
 
@@ -485,18 +489,18 @@ class OpenerDirector:
 
     @asyncio.coroutine
     def _open(self, req, data=None):
-        result = self._call_chain(self.handle_open, 'default',
+        result = yield from self._call_chain(self.handle_open, 'default',
                                   'default_open', req)
         if result:
             return result
 
         protocol = req.type
-        result = self._call_chain(self.handle_open, protocol, protocol +
+        result = yield from self._call_chain(self.handle_open, protocol, protocol +
                                   '_open', req)
         if result:
             return result
 
-        _r = self._call_chain(self.handle_open, 'unknown',
+        _r = yield from self._call_chain(self.handle_open, 'unknown',
                                 'unknown_open', req)
         return _r
 
@@ -646,6 +650,7 @@ class HTTPRedirectHandler(BaseHandler):
     # infinite loop, the request object needs to track what URLs we
     # have already seen.  Do this by adding a handler-specific
     # attribute to the Request object.
+    @asyncio.coroutine
     def http_error_302(self, req, fp, code, msg, headers):
         # Some servers (incorrectly) return multiple Location headers
         # (so probably same goes for URI).  Use first header.
@@ -700,7 +705,8 @@ class HTTPRedirectHandler(BaseHandler):
         if hasattr(fp, 'close'):
             fp.close()
 
-        return self.parent.open(new, timeout=req.timeout)
+        _r = yield from self.parent.open(new, timeout=req.timeout)
+        return _r
 
     http_error_301 = http_error_303 = http_error_307 = http_error_302
 
@@ -752,6 +758,7 @@ class ProxyHandler(BaseHandler):
                     lambda r, proxy=url, type=type, meth=self.proxy_open:
                         meth(r, proxy, type))
 
+    @asyncio.coroutine
     def proxy_open(self, req, proxy, type):
         orig_type = req.type
         proxy_type, user, password, hostport = _parse_proxy(proxy)
@@ -778,7 +785,8 @@ class ProxyHandler(BaseHandler):
             # {'http': 'ftp://proxy.example.com'}, we may end up turning
             # a request for http://acme.example.com/a into one for
             # ftp://proxy.example.com/a
-            return self.parent.open(req, timeout=req.timeout)
+            _r = yield from self.parent.open(req, timeout=req.timeout)
+            return _r
 
 class HTTPPasswordMgr:
 
@@ -874,6 +882,7 @@ class AbstractBasicAuthHandler:
         self.passwd = password_mgr
         self.add_password = self.passwd.add_password
 
+    @asyncio.coroutine
     def http_error_auth_reqed(self, authreq, host, req, headers):
         # host may be an authority (without userinfo) or a URL with an
         # authority
@@ -894,8 +903,10 @@ class AbstractBasicAuthHandler:
                         warnings.warn("Basic Auth Realm was unquoted",
                                       UserWarning, 2)
                     if scheme.lower() == 'basic':
-                        return self.retry_http_basic_auth(host, req, realm)
+                        _r = yield from self.retry_http_basic_auth(host, req, realm)
+                        return _r
 
+    @asyncio.coroutine
     def retry_http_basic_auth(self, host, req, realm):
         user, pw = self.passwd.find_user_password(realm, host)
         if pw is not None:
@@ -904,7 +915,8 @@ class AbstractBasicAuthHandler:
             if req.get_header(self.auth_header, None) == auth:
                 return None
             req.add_unredirected_header(self.auth_header, auth)
-            return self.parent.open(req, timeout=req.timeout)
+            _r = yield from self.parent.open(req, timeout=req.timeout)
+            return _r
         else:
             return None
 
@@ -913,9 +925,10 @@ class HTTPBasicAuthHandler(AbstractBasicAuthHandler, BaseHandler):
 
     auth_header = 'Authorization'
 
+    @asyncio.coroutine
     def http_error_401(self, req, fp, code, msg, headers):
         url = req.full_url
-        response = self.http_error_auth_reqed('www-authenticate',
+        response = yield from self.http_error_auth_reqed('www-authenticate',
                                           url, req, headers)
         return response
 
@@ -924,13 +937,14 @@ class ProxyBasicAuthHandler(AbstractBasicAuthHandler, BaseHandler):
 
     auth_header = 'Proxy-authorization'
 
+    @asyncio.coroutine
     def http_error_407(self, req, fp, code, msg, headers):
         # http_error_auth_reqed requires that there is no userinfo component in
         # authority.  Assume there isn't one, since urllib.request does not (and
         # should not, RFC 3986 s. 3.2.1) support requests for URLs containing
         # userinfo.
         authority = req.host
-        response = self.http_error_auth_reqed('proxy-authenticate',
+        response = yield from self.http_error_auth_reqed('proxy-authenticate',
                                           authority, req, headers)
         return response
 
@@ -962,6 +976,7 @@ class AbstractDigestAuthHandler:
     def reset_retry_count(self):
         self.retried = 0
 
+    @asyncio.coroutine
     def http_error_auth_reqed(self, auth_header, host, req, headers):
         authreq = headers.get(auth_header, None)
         if self.retried > 5:
@@ -977,11 +992,13 @@ class AbstractDigestAuthHandler:
         if authreq:
             scheme = authreq.split()[0]
             if scheme.lower() == 'digest':
-                return self.retry_http_digest_auth(req, authreq)
+                _r = yield from self.retry_http_digest_auth(req, authreq)
+                return _r
             elif scheme.lower() != 'basic':
                 raise ValueError("AbstractDigestAuthHandler does not support"
                                  " the following scheme: '%s'" % scheme)
 
+    @asyncio.coroutine
     def retry_http_digest_auth(self, req, auth):
         token, challenge = auth.split(' ', 1)
         chal = parse_keqv_list(filter(None, parse_http_list(challenge)))
@@ -991,7 +1008,7 @@ class AbstractDigestAuthHandler:
             if req.headers.get(self.auth_header, None) == auth_val:
                 return None
             req.add_unredirected_header(self.auth_header, auth_val)
-            resp = self.parent.open(req, timeout=req.timeout)
+            resp = yield from self.parent.open(req, timeout=req.timeout)
             return resp
 
     def get_cnonce(self, nonce):
@@ -1090,9 +1107,10 @@ class HTTPDigestAuthHandler(BaseHandler, AbstractDigestAuthHandler):
     auth_header = 'Authorization'
     handler_order = 490  # before Basic auth
 
+    @asyncio.coroutine
     def http_error_401(self, req, fp, code, msg, headers):
         host = urlparse(req.full_url)[1]
-        retry = self.http_error_auth_reqed('www-authenticate',
+        retry = yield from self.http_error_auth_reqed('www-authenticate',
                                            host, req, headers)
         self.reset_retry_count()
         return retry
@@ -1103,9 +1121,10 @@ class ProxyDigestAuthHandler(BaseHandler, AbstractDigestAuthHandler):
     auth_header = 'Proxy-Authorization'
     handler_order = 490  # before Basic auth
 
+    @asyncio.coroutine
     def http_error_407(self, req, fp, code, msg, headers):
         host = req.host
-        retry = self.http_error_auth_reqed('proxy-authenticate',
+        retry = yield from self.http_error_auth_reqed('proxy-authenticate',
                                            host, req, headers)
         self.reset_retry_count()
         return retry
@@ -1263,7 +1282,9 @@ class HTTPCookieProcessor(BaseHandler):
         self.cookiejar.add_cookie_header(request)
         return request
 
+    @asyncio.coroutine
     def http_response(self, request, response):
+        yield None # make generator
         self.cookiejar.extract_cookies(response, request)
         return response
 
@@ -1330,6 +1351,8 @@ def parse_http_list(s):
 
 class FileHandler(BaseHandler):
     # Use local file or FTP depending on form of URL
+
+    @asyncio.coroutine
     def file_open(self, req):
         url = req.selector
         if url[:2] == '//' and url[2:3] != '/' and (req.host and
@@ -1390,9 +1413,13 @@ def _safe_gethostbyname(host):
         return None
 
 class FTPHandler(BaseHandler):
+
+    @asyncio.coroutine
     def ftp_open(self, req):
         import ftplib
         import mimetypes
+
+        yield None # make this a coroutine
         host = req.host
         if not host:
             raise URLError('ftp error: no host given')
@@ -1423,7 +1450,7 @@ class FTPHandler(BaseHandler):
         if dirs and not dirs[0]:
             dirs = dirs[1:]
         try:
-            fw = self.connect_ftp(user, passwd, host, port, dirs, req.timeout)
+            fw = yield from self.connect_ftp(user, passwd, host, port, dirs, req.timeout)
             type = file and 'I' or 'D'
             for attr in attrs:
                 attr, value = splitvalue(attr)
@@ -1443,9 +1470,11 @@ class FTPHandler(BaseHandler):
             exc = URLError('ftp error: %r' % exp)
             raise exc.with_traceback(sys.exc_info()[2])
 
+    @asyncio.coroutine
     def connect_ftp(self, user, passwd, host, port, dirs, timeout):
-        return ftpwrapper(user, passwd, host, port, dirs, timeout,
+        _r = yield from ftpwrapper(user, passwd, host, port, dirs, timeout,
                           persistent=False)
+        return _r
 
 class CacheFTPHandler(FTPHandler):
     # XXX would be nice to have pluggable cache strategies
@@ -1463,12 +1492,13 @@ class CacheFTPHandler(FTPHandler):
     def setMaxConns(self, m):
         self.max_conns = m
 
+    @asyncio.coroutine
     def connect_ftp(self, user, passwd, host, port, dirs, timeout):
         key = user, host, port, '/'.join(dirs), timeout
         if key in self.cache:
             self.timeout[key] = time.time() + self.delay
         else:
-            self.cache[key] = ftpwrapper(user, passwd, host, port,
+            self.cache[key] = yield from ftpwrapper(user, passwd, host, port,
                                          dirs, timeout)
             self.timeout[key] = time.time() + self.delay
         self.check_cache()
@@ -1502,6 +1532,8 @@ class CacheFTPHandler(FTPHandler):
         self.timeout.clear()
 
 class DataHandler(BaseHandler):
+
+    @asyncio.coroutine
     def data_open(self, req):
         # data URLs as specified in RFC 2397.
         #
@@ -1512,6 +1544,8 @@ class DataHandler(BaseHandler):
         # mediatype := [ type "/" subtype ] *( ";" parameter )
         # data      := *urlchar
         # parameter := attribute "=" value
+
+        yield None # make generator
         url = req.full_url
 
         scheme, data = url.split(":",1)
@@ -2047,7 +2081,9 @@ class FancyURLopener(URLopener):
         self.tries = 0
         return result
 
+    @asyncio.coroutine
     def redirect_internal(self, url, fp, errcode, errmsg, headers, data):
+
         if 'location' in headers:
             newurl = headers['location']
         elif 'uri' in headers:
@@ -2074,7 +2110,8 @@ class FancyURLopener(URLopener):
                             " Redirection to url '%s' is not allowed." % newurl,
                             headers, fp)
 
-        return self.open(newurl)
+        resp = yield from self.open(newurl)
+        return resp
 
     def http_error_301(self, url, fp, errcode, errmsg, headers, data=None):
         """Error 301 -- also relocated (permanently)."""
@@ -2091,6 +2128,7 @@ class FancyURLopener(URLopener):
         else:
             return self.http_error_default(url, fp, errcode, errmsg, headers)
 
+    @asyncio.coroutine
     def http_error_401(self, url, fp, errcode, errmsg, headers, data=None,
             retry=False):
         """Error 401 -- authentication required.
@@ -2112,9 +2150,10 @@ class FancyURLopener(URLopener):
                     headers)
         name = 'retry_' + self.type + '_basic_auth'
         if data is None:
-            return getattr(self,name)(url, realm)
+            _r = yield from getattr(self,name)(url, realm)
         else:
-            return getattr(self,name)(url, realm, data)
+            _r = yield from getattr(self,name)(url, realm, data)
+        return _r
 
     def http_error_407(self, url, fp, errcode, errmsg, headers, data=None,
             retry=False):
@@ -2137,10 +2176,12 @@ class FancyURLopener(URLopener):
                     headers)
         name = 'retry_proxy_' + self.type + '_basic_auth'
         if data is None:
-            return getattr(self,name)(url, realm)
+            _r = yield from getattr(self,name)(url, realm)
         else:
-            return getattr(self,name)(url, realm, data)
+            _r = yield from getattr(self,name)(url, realm, data)
+        return _r
 
+    @asyncio.coroutine
     def retry_proxy_http_basic_auth(self, url, realm, data=None):
         host, selector = splithost(url)
         newurl = 'http://' + host + selector
@@ -2155,10 +2196,12 @@ class FancyURLopener(URLopener):
                                   quote(passwd, safe=''), proxyhost)
         self.proxies['http'] = 'http://' + proxyhost + proxyselector
         if data is None:
-            return self.open(newurl)
+            _r = yield from self.open(newurl)
         else:
-            return self.open(newurl, data)
+            _r = yield from self.open(newurl, data)
+        return _r
 
+    @asyncio.coroutine
     def retry_proxy_https_basic_auth(self, url, realm, data=None):
         host, selector = splithost(url)
         newurl = 'https://' + host + selector
@@ -2173,10 +2216,12 @@ class FancyURLopener(URLopener):
                                   quote(passwd, safe=''), proxyhost)
         self.proxies['https'] = 'https://' + proxyhost + proxyselector
         if data is None:
-            return self.open(newurl)
+            _r = yield from self.open(newurl)
         else:
-            return self.open(newurl, data)
+            _r = yield from self.open(newurl, data)
+        return _r
 
+    @asyncio.coroutine
     def retry_http_basic_auth(self, url, realm, data=None):
         host, selector = splithost(url)
         i = host.find('@') + 1
@@ -2187,10 +2232,12 @@ class FancyURLopener(URLopener):
                              quote(passwd, safe=''), host)
         newurl = 'http://' + host + selector
         if data is None:
-            return self.open(newurl)
+            _r = yield from self.open(newurl)
         else:
-            return self.open(newurl, data)
+            _r = yield from self.open(newurl, data)
+        return _r
 
+    @asyncio.coroutine
     def retry_https_basic_auth(self, url, realm, data=None):
         host, selector = splithost(url)
         i = host.find('@') + 1
@@ -2201,9 +2248,10 @@ class FancyURLopener(URLopener):
                              quote(passwd, safe=''), host)
         newurl = 'https://' + host + selector
         if data is None:
-            return self.open(newurl)
+            _r = yield from self.open(newurl)
         else:
-            return self.open(newurl, data)
+            _r = yield from self.open(newurl, data)
+        return _r
 
     def get_user_passwd(self, host, realm, clear_cache=0):
         key = realm + '@' + host.lower()
