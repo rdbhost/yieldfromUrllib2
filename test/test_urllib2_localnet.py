@@ -1,13 +1,82 @@
 import base64
 import os
 import email
-import urllib.parse
-import urllib.request
+# import urllib.parse
+# import urllib.request
 import http.server
 import unittest
 import hashlib
 
+import asyncio
+import functools
+import sys
+import socket
+
+sys.path.insert(0, '..')
+import parse
+import request
+import error
+
 from test import support
+
+sys.path.append('.')
+import testtcpserver as server
+from testtcpserver import RECEIVE, TestingSocket
+
+CONNECT = ('127.0.0.1', 2222)
+testLoop = asyncio.get_event_loop()
+
+def open_socket_conn(host='127.0.0.1', port=2222):
+    """  """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    sock.connect((host, port))
+    return sock
+
+def _prep_server(body, prime=False, reader=None):
+    commands = []
+    if type(body) == type([]):
+        commands.extend(body)
+    else:
+        commands.extend([RECEIVE, body])
+    srvr = server.AsyncioCommandServer(commands, testLoop if reader else None, reader, *CONNECT, verbose=False)
+    if prime:
+        sock = open_socket_conn(*CONNECT)
+        sock.sendall(b' ')
+        return srvr, sock
+    else:
+        return srvr, None
+
+def _run_with_server_pre(f, body='', srvr=None, sock=None):
+    try:
+        if srvr is None:
+            srvr, sock = _prep_server(body, prime=True)
+        testLoop.run_until_complete(f(sock))
+    except:
+        raise
+    finally:
+        srvr.stop()
+
+def _run_with_server(f, body='', srvr=None):
+    if srvr is None:
+        srvr, _j = _prep_server(body)
+    testLoop.run_until_complete(f(*CONNECT))
+    srvr.stop()
+
+def async_test(f):
+
+    testLoop = asyncio.get_event_loop()
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        coro = asyncio.coroutine(f)
+        future = coro(*args, **kwargs)
+        testLoop.run_until_complete(future)
+    return wrapper
+
+async_test.__test__ = False # not a test
+
+
 
 threading = support.import_module('threading')
 
@@ -184,7 +253,7 @@ class DigestAuthHandler:
             auth_validated = False
 
             # MSIE uses short_path in its validation, but Python's
-            # urllib.request uses the full path, so we're going to see if
+            # request uses the full path, so we're going to see if
             # either of them works here.
 
             for path in [request_handler.path, request_handler.short_path]:
@@ -207,6 +276,16 @@ class BasicAuthHandler(http.server.BaseHTTPRequestHandler):
     REALM = 'Test'
     USER_PASSWD = "%s:%s" % (USER, PASSWD)
     ENCODED_AUTH = base64.b64encode(USER_PASSWD.encode('ascii')).decode('ascii')
+
+    @asyncio.coroutine
+    def aioAssertRaises(self, exc, f, *args, **kwargs):
+        """tests a coroutine for whether it raises given error."""
+        try:
+            yield from f(*args, **kwargs)
+        except exc as e:
+            pass
+        else:
+            raise Exception('expected %s not raised' % exc.__name__)
 
     def __init__(self, *args, **kwargs):
         http.server.BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
@@ -262,7 +341,7 @@ class FakeProxyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        (scm, netloc, path, params, query, fragment) = urllib.parse.urlparse(
+        (scm, netloc, path, params, query, fragment) = parse.urlparse(
             self.path, "http")
         self.short_path = path
         if self.digest_auth_handler.handle_request(self):
@@ -297,20 +376,33 @@ class BasicAuthTests(unittest.TestCase):
         self.server.stop()
         super(BasicAuthTests, self).tearDown()
 
-    def test_basic_auth_success(self):
-        ah = urllib.request.HTTPBasicAuthHandler()
-        ah.add_password(self.REALM, self.server_url, self.USER, self.PASSWD)
-        urllib.request.install_opener(urllib.request.build_opener(ah))
+    @asyncio.coroutine
+    def aioAssertRaises(self, exc, f, *args, **kwargs):
+        """tests a coroutine for whether it raises given error."""
         try:
-            self.assertTrue(urllib.request.urlopen(self.server_url))
-        except urllib.error.HTTPError:
+            yield from f(*args, **kwargs)
+        except exc as e:
+            pass
+        else:
+            raise Exception('expected %s not raised' % exc.__name__)
+
+    @async_test
+    def test_basic_auth_success(self):
+        ah = request.HTTPBasicAuthHandler()
+        ah.add_password(self.REALM, self.server_url, self.USER, self.PASSWD)
+        request.install_opener(request.build_opener(ah))
+        try:
+            _u = yield from request.urlopen(self.server_url)
+            self.assertTrue(_u)
+        except error.HTTPError:
             self.fail("Basic auth failed for the url: %s", self.server_url)
 
+    @async_test
     def test_basic_auth_httperror(self):
-        ah = urllib.request.HTTPBasicAuthHandler()
+        ah = request.HTTPBasicAuthHandler()
         ah.add_password(self.REALM, self.server_url, self.USER, self.INCORRECT_PASSWD)
-        urllib.request.install_opener(urllib.request.build_opener(ah))
-        self.assertRaises(urllib.error.HTTPError, urllib.request.urlopen, self.server_url)
+        request.install_opener(request.build_opener(ah))
+        self.aioAssertRaises(error.HTTPError, request.urlopen, self.server_url)
 
 
 @unittest.skipUnless(threading, "Threading required for this test.")
@@ -334,51 +426,65 @@ class ProxyAuthTests(unittest.TestCase):
         self.server.start()
         self.server.ready.wait()
         proxy_url = "http://127.0.0.1:%d" % self.server.port
-        handler = urllib.request.ProxyHandler({"http" : proxy_url})
-        self.proxy_digest_handler = urllib.request.ProxyDigestAuthHandler()
-        self.opener = urllib.request.build_opener(
+        handler = request.ProxyHandler({"http" : proxy_url})
+        self.proxy_digest_handler = request.ProxyDigestAuthHandler()
+        self.opener = request.build_opener(
             handler, self.proxy_digest_handler)
 
     def tearDown(self):
         self.server.stop()
         super(ProxyAuthTests, self).tearDown()
 
+    @asyncio.coroutine
+    def aioAssertRaises(self, exc, f, *args, **kwargs):
+        """tests a coroutine for whether it raises given error."""
+        try:
+            yield from f(*args, **kwargs)
+        except exc as e:
+            pass
+        else:
+            raise Exception('expected %s not raised' % exc.__name__)
+
+    @async_test
     def test_proxy_with_bad_password_raises_httperror(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD+"bad")
         self.digest_auth_handler.set_qop("auth")
-        self.assertRaises(urllib.error.HTTPError,
+        self.aioAssertRaises(error.HTTPError,
                           self.opener.open,
                           self.URL)
 
+    @async_test
     def test_proxy_with_no_password_raises_httperror(self):
         self.digest_auth_handler.set_qop("auth")
-        self.assertRaises(urllib.error.HTTPError,
+        self.aioAssertRaises(error.HTTPError,
                           self.opener.open,
                           self.URL)
 
+    @async_test
     def test_proxy_qop_auth_works(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD)
         self.digest_auth_handler.set_qop("auth")
-        result = self.opener.open(self.URL)
-        while result.read():
+        result = yield from self.opener.open(self.URL)
+        while (yield from result.read()):
             pass
         result.close()
 
+    @async_test
     def test_proxy_qop_auth_int_works_or_throws_urlerror(self):
         self.proxy_digest_handler.add_password(self.REALM, self.URL,
                                                self.USER, self.PASSWD)
         self.digest_auth_handler.set_qop("auth-int")
         try:
-            result = self.opener.open(self.URL)
-        except urllib.error.URLError:
+            result = yield from self.opener.open(self.URL)
+        except error.URLError:
             # It's okay if we don't support auth-int, but we certainly
             # shouldn't receive any kind of exception here other than
             # a URLError.
             result = None
         if result:
-            while result.read():
+            while (yield from result.read()):
                 pass
             result.close()
 
@@ -428,7 +534,7 @@ def GetRequestHandler(responses):
 
 @unittest.skipUnless(threading, "Threading required for this test.")
 class TestUrlopen(unittest.TestCase):
-    """Tests urllib.request.urlopen using the network.
+    """Tests request.urlopen using the network.
 
     These tests are not exhaustive.  Assuming that testing using files does a
     good job overall of some of the basic interface features.  There are no
@@ -450,15 +556,17 @@ class TestUrlopen(unittest.TestCase):
         os.environ.update(self.old_environ)
         super(TestUrlopen, self).tearDown()
 
+    @asyncio.coroutine
     def urlopen(self, url, data=None, **kwargs):
         l = []
-        f = urllib.request.urlopen(url, data, **kwargs)
+        f = yield from request.urlopen(url, data, **kwargs)
         try:
             # Exercise various methods
-            l.extend(f.readlines(200))
-            l.append(f.readline())
-            l.append(f.read(1024))
-            l.append(f.read())
+            #_f = yield from f.readlines(200)
+            #l.extend(_f)
+            l.append((yield from f.readline()))
+            l.append((yield from f.read(1024)))
+            l.append((yield from f.read()))
         finally:
             f.close()
         return b"".join(l)
@@ -476,7 +584,7 @@ class TestUrlopen(unittest.TestCase):
         return handler
 
     def start_https_server(self, responses=None, **kwargs):
-        if not hasattr(urllib.request, 'HTTPSHandler'):
+        if not hasattr(request, 'HTTPSHandler'):
             self.skipTest('ssl support required')
         from test.ssl_servers import make_https_server
         if responses is None:
@@ -485,6 +593,16 @@ class TestUrlopen(unittest.TestCase):
         server = make_https_server(self, handler_class=handler, **kwargs)
         handler.port = server.port
         return handler
+
+    @asyncio.coroutine
+    def aioAssertRaises(self, exc, f, *args, **kwargs):
+        """tests a coroutine for whether it raises given error."""
+        try:
+            yield from f(*args, **kwargs)
+        except exc as e:
+            pass
+        else:
+            raise Exception('expected %s not raised' % exc.__name__)
 
     def test_redirection(self):
         expected_response = b"We got here..."
@@ -495,7 +613,7 @@ class TestUrlopen(unittest.TestCase):
         ]
 
         handler = self.start_server(responses)
-        data = self.urlopen("http://localhost:%s/" % handler.port)
+        data = yield from self.urlopen("http://localhost:%s/" % handler.port)
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/", "/somewhere_else"])
 
@@ -510,17 +628,18 @@ class TestUrlopen(unittest.TestCase):
                         )
         response = [(200, [("Transfer-Encoding", "chunked")], chunked_start)]
         handler = self.start_server(response)
-        data = self.urlopen("http://localhost:%s/" % handler.port)
+        data = yield from self.urlopen("http://localhost:%s/" % handler.port)
         self.assertEqual(data, expected_response)
 
+    @async_test
     def test_404(self):
         expected_response = b"Bad bad bad..."
         handler = self.start_server([(404, [], expected_response)])
 
         try:
-            self.urlopen("http://localhost:%s/weeble" % handler.port)
-        except urllib.error.URLError as f:
-            data = f.read()
+            yield from self.urlopen("http://localhost:%s/weeble" % handler.port)
+        except error.URLError as f:
+            data = yield from f.read()
             f.close()
         else:
             self.fail("404 should raise URLError")
@@ -528,51 +647,53 @@ class TestUrlopen(unittest.TestCase):
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/weeble"])
 
+    @async_test
     def test_200(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
-        data = self.urlopen("http://localhost:%s/bizarre" % handler.port)
+        data = yield from self.urlopen("http://localhost:%s/bizarre" % handler.port)
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/bizarre"])
 
     def test_200_with_parameters(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
-        data = self.urlopen("http://localhost:%s/bizarre" % handler.port,
+        data = yield from self.urlopen("http://localhost:%s/bizarre" % handler.port,
                              b"get=with_feeling")
         self.assertEqual(data, expected_response)
         self.assertEqual(handler.requests, ["/bizarre", b"get=with_feeling"])
 
     def test_https(self):
         handler = self.start_https_server()
-        data = self.urlopen("https://localhost:%s/bizarre" % handler.port)
+        data = yield from self.urlopen("https://localhost:%s/bizarre" % handler.port)
         self.assertEqual(data, b"we care a bit")
 
     def test_https_with_cafile(self):
         handler = self.start_https_server(certfile=CERT_localhost)
         import ssl
         # Good cert
-        data = self.urlopen("https://localhost:%s/bizarre" % handler.port,
+        data = yield from self.urlopen("https://localhost:%s/bizarre" % handler.port,
                             cafile=CERT_localhost)
         self.assertEqual(data, b"we care a bit")
         # Bad cert
-        with self.assertRaises(urllib.error.URLError) as cm:
-            self.urlopen("https://localhost:%s/bizarre" % handler.port,
+        with self.assertRaises(error.URLError) as cm:
+            yield from self.urlopen("https://localhost:%s/bizarre" % handler.port,
                          cafile=CERT_fakehostname)
         # Good cert, but mismatching hostname
         handler = self.start_https_server(certfile=CERT_fakehostname)
         with self.assertRaises(ssl.CertificateError) as cm:
-            self.urlopen("https://localhost:%s/bizarre" % handler.port,
+            yield from self.urlopen("https://localhost:%s/bizarre" % handler.port,
                          cafile=CERT_fakehostname)
 
     def test_https_with_cadefault(self):
         handler = self.start_https_server(certfile=CERT_localhost)
         # Self-signed cert should fail verification with system certificate store
-        with self.assertRaises(urllib.error.URLError) as cm:
-            self.urlopen("https://localhost:%s/bizarre" % handler.port,
+        with self.assertRaises(error.URLError) as cm:
+            yield from self.urlopen("https://localhost:%s/bizarre" % handler.port,
                          cadefault=True)
 
-    def test_https_sni(self):
+    # sni not supported by yieldfrom.urllib.requests, because asyncio does not support
+    def tst_https_sni(self):
         if ssl is None:
             self.skipTest("ssl module required")
         if not ssl.HAS_SNI:
@@ -584,31 +705,34 @@ class TestUrlopen(unittest.TestCase):
         context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
         context.set_servername_callback(cb_sni)
         handler = self.start_https_server(context=context, certfile=CERT_localhost)
-        self.urlopen("https://localhost:%s" % handler.port)
+        yield from self.urlopen("https://localhost:%s" % handler.port)
         self.assertEqual(sni_name, "localhost")
 
     def test_sending_headers(self):
         handler = self.start_server()
-        req = urllib.request.Request("http://localhost:%s/" % handler.port,
+        req = request.Request("http://localhost:%s/" % handler.port,
                                      headers={"Range": "bytes=20-39"})
-        urllib.request.urlopen(req)
+        yield from request.urlopen(req)
         self.assertEqual(handler.headers_received["Range"], "bytes=20-39")
 
+    @async_test
     def test_basic(self):
         handler = self.start_server()
-        open_url = urllib.request.urlopen("http://localhost:%s" % handler.port)
+        open_url = yield from request.urlopen("http://localhost:%s" % handler.port)
         for attr in ("read", "close", "info", "geturl"):
             self.assertTrue(hasattr(open_url, attr), "object returned from "
                          "urlopen lacks the %s attribute" % attr)
         try:
-            self.assertTrue(open_url.read(), "calling 'read' failed")
+            _r = yield from open_url.read()
+            self.assertTrue(_r, "calling 'read' failed")
         finally:
             open_url.close()
 
+    @async_test
     def test_info(self):
         handler = self.start_server()
         try:
-            open_url = urllib.request.urlopen(
+            open_url = yield from request.urlopen(
                 "http://localhost:%s" % handler.port)
             info_obj = open_url.info()
             self.assertIsInstance(info_obj, email.message.Message,
@@ -618,13 +742,15 @@ class TestUrlopen(unittest.TestCase):
         finally:
             self.server.stop()
 
+    @async_test
     def test_geturl(self):
         # Make sure same URL as opened is returned by geturl.
         handler = self.start_server()
-        open_url = urllib.request.urlopen("http://localhost:%s" % handler.port)
+        open_url = yield from request.urlopen("http://localhost:%s" % handler.port)
         url = open_url.geturl()
         self.assertEqual(url, "http://localhost:%s" % handler.port)
 
+    @async_test
     def test_bad_address(self):
         # Make sure proper exception is raised when connecting to a bogus
         # address.
@@ -633,7 +759,7 @@ class TestUrlopen(unittest.TestCase):
         # so we run the test only when -unetwork/-uall is specified to
         # mitigate the problem a bit (see #17564)
         support.requires('network')
-        self.assertRaises(OSError,
+        self.aioAssertRaises(OSError,
                           # Given that both VeriSign and various ISPs have in
                           # the past or are presently hijacking various invalid
                           # domain name requests in an attempt to boost traffic
@@ -651,21 +777,24 @@ class TestUrlopen(unittest.TestCase):
                           # failing if the ISP hijacks all invalid domain
                           # requests.  The real solution would be to be able to
                           # parameterize the framework with a mock resolver.
-                          urllib.request.urlopen,
+                          request.urlopen,
                           "http://sadflkjsasf.i.nvali.d./")
 
-    def test_iteration(self):
+    @async_test
+    def tst_iteration(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
-        data = urllib.request.urlopen("http://localhost:%s" % handler.port)
+        resp = yield from request.urlopen("http://localhost:%s" % handler.port)
+        line = yield from resp.read()
         for line in data:
             self.assertEqual(line, expected_response)
 
-    def test_line_iteration(self):
+    @async_test
+    def tst_line_iteration(self):
         lines = [b"We\n", b"got\n", b"here\n", b"verylong " * 8192 + b"\n"]
         expected_response = b"".join(lines)
         handler = self.start_server([(200, [], expected_response)])
-        data = urllib.request.urlopen("http://localhost:%s" % handler.port)
+        data = yield from request.urlopen("http://localhost:%s" % handler.port)
         for index, line in enumerate(data):
             self.assertEqual(line, lines[index],
                              "Fetched line number %s doesn't match expected:\n"
