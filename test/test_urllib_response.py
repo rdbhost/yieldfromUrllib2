@@ -5,6 +5,7 @@ import tempfile
 import urllib.response
 import unittest
 
+
 class TestResponse(unittest.TestCase):
 
     def setUp(self):

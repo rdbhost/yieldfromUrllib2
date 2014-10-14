@@ -489,8 +489,7 @@ class OpenerDirector:
 
     @asyncio.coroutine
     def _open(self, req, data=None):
-        result = yield from self._call_chain(self.handle_open, 'default',
-                                  'default_open', req)
+        result = yield from self._call_chain(self.handle_open, 'default', 'default_open', req)
         if result:
             return result
 

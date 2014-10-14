@@ -4,13 +4,81 @@ from test.test_urllib2 import sanepathname2url
 
 import os
 import socket
-import urllib.error
-import urllib.request
+#import urllib.error
+#import urllib.request
 import sys
+import asyncio
+import functools
 try:
     import ssl
 except ImportError:
     ssl = None
+
+sys.path.insert(0, '..')
+import error
+import request
+
+sys.path.append('.')
+import testtcpserver as server
+from testtcpserver import RECEIVE, TestingSocket
+
+from test import support
+support.use_resources = ['network']
+
+
+CONNECT = ('127.0.0.1', 2222)
+testLoop = asyncio.get_event_loop()
+
+def open_socket_conn(host='127.0.0.1', port=2222):
+    """  """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    sock.connect((host, port))
+    return sock
+
+def _prep_server(body, prime=False, reader=None):
+    commands = []
+    if type(body) == type([]):
+        commands.extend(body)
+    else:
+        commands.extend([RECEIVE, body])
+    srvr = server.AsyncioCommandServer(commands, testLoop if reader else None, reader, *CONNECT, verbose=False)
+    if prime:
+        sock = open_socket_conn(*CONNECT)
+        sock.sendall(b' ')
+        return srvr, sock
+    else:
+        return srvr, None
+
+def _run_with_server_pre(f, body='', srvr=None, sock=None):
+    try:
+        if srvr is None:
+            srvr, sock = _prep_server(body, prime=True)
+        testLoop.run_until_complete(f(sock))
+    except:
+        raise
+    finally:
+        srvr.stop()
+
+def _run_with_server(f, body='', srvr=None):
+    if srvr is None:
+        srvr, _j = _prep_server(body)
+    testLoop.run_until_complete(f(*CONNECT))
+    srvr.stop()
+
+def async_test(f):
+
+    testLoop = asyncio.get_event_loop()
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        coro = asyncio.coroutine(f)
+        future = coro(*args, **kwargs)
+        testLoop.run_until_complete(future)
+    return wrapper
+
+async_test.__test__ = False # not a test
+
 
 support.requires("network")
 
@@ -29,14 +97,16 @@ def _retry_thrice(func, exc, *args, **kwargs):
     raise last_exc
 
 def _wrap_with_retry_thrice(func, exc):
+    @asyncio.coroutine
     def wrapped(*args, **kwargs):
-        return _retry_thrice(func, exc, *args, **kwargs)
+        r = yield from _retry_thrice(func, exc, *args, **kwargs)
+        return r
     return wrapped
 
 # Connecting to remote hosts is flaky.  Make it more robust by retrying
 # the connection several times.
-_urlopen_with_retry = _wrap_with_retry_thrice(urllib.request.urlopen,
-                                              urllib.error.URLError)
+_urlopen_with_retry = _wrap_with_retry_thrice(request.urlopen,
+                                              error.URLError)
 
 
 class AuthTests(unittest.TestCase):
@@ -80,18 +150,31 @@ class AuthTests(unittest.TestCase):
 
 class CloseSocketTest(unittest.TestCase):
 
+    @async_test
     def test_close(self):
         # calling .close() on urllib2's response objects should close the
         # underlying socket
         url = "http://www.example.com/"
         with support.transient_internet(url):
-            response = _urlopen_with_retry(url)
+            response = yield from _urlopen_with_retry(url)
             sock = response.fp
-            self.assertFalse(sock.closed)
+            self.assertFalse(sock.at_eof())
             response.close()
-            self.assertTrue(sock.closed)
+            self.assertTrue(sock.at_eof())
 
 class OtherNetworkTests(unittest.TestCase):
+
+    @asyncio.coroutine
+    def aioAssertRaises(self, exc, f, *args, **kwargs):
+        """tests a coroutine for whether it raises given error."""
+        try:
+            yield from f(*args, **kwargs)
+        except exc as e:
+            pass
+        else:
+            raise Exception('expected %s not raised' % exc.__name__)
+
+
     def setUp(self):
         if 0:  # for debugging
             import logging
@@ -105,7 +188,7 @@ class OtherNetworkTests(unittest.TestCase):
         urls = [
             'ftp://ftp.debian.org/debian/README',
             ('ftp://ftp.debian.org/debian/non-existent-file',
-             None, urllib.error.URLError),
+             None, error.URLError),
             'ftp://gatekeeper.research.compaq.com/pub/DEC/SRC'
                 '/research-reports/00README-Legal-Rules-Regs',
             ]
@@ -120,13 +203,13 @@ class OtherNetworkTests(unittest.TestCase):
             urls = [
                 'file:' + sanepathname2url(os.path.abspath(TESTFN)),
                 ('file:///nonsensename/etc/passwd', None,
-                 urllib.error.URLError),
+                 error.URLError),
                 ]
             self._test_urls(urls, self._extra_handlers(), retry=True)
         finally:
             os.remove(TESTFN)
 
-        self.assertRaises(ValueError, urllib.request.urlopen,'./relative_path/to/file')
+        self.aioAssertRaises(ValueError, request.urlopen,'./relative_path/to/file')
 
     # XXX Following test depends on machine configurations that are internal
     # to CNRI.  Need to set up a public server with the right authentication
@@ -156,35 +239,39 @@ class OtherNetworkTests(unittest.TestCase):
 
 ##             self._test_urls(urls, self._extra_handlers()+[bauth, dauth])
 
+    @async_test
     def test_urlwithfrag(self):
         urlwith_frag = "https://docs.python.org/2/glossary.html#glossary"
         with support.transient_internet(urlwith_frag):
-            req = urllib.request.Request(urlwith_frag)
-            res = urllib.request.urlopen(req)
+            req = request.Request(urlwith_frag)
+            res = yield from request.urlopen(req)
             self.assertEqual(res.geturl(),
                     "https://docs.python.org/2/glossary.html#glossary")
 
+    @async_test
     def test_redirect_url_withfrag(self):
         redirect_url_with_frag = "http://bit.ly/1iSHToT"
         with support.transient_internet(redirect_url_with_frag):
-            req = urllib.request.Request(redirect_url_with_frag)
-            res = urllib.request.urlopen(req)
+            req = request.Request(redirect_url_with_frag)
+            res = yield from request.urlopen(req)
             self.assertEqual(res.geturl(),
                     "https://docs.python.org/3.4/glossary.html#term-global-interpreter-lock")
 
+    @async_test
     def test_custom_headers(self):
         url = "http://www.example.com"
         with support.transient_internet(url):
-            opener = urllib.request.build_opener()
-            request = urllib.request.Request(url)
-            self.assertFalse(request.header_items())
-            opener.open(request)
-            self.assertTrue(request.header_items())
-            self.assertTrue(request.has_header('User-agent'))
-            request.add_header('User-Agent','Test-Agent')
-            opener.open(request)
-            self.assertEqual(request.get_header('User-agent'),'Test-Agent')
+            opener = request.build_opener()
+            req = request.Request(url)
+            self.assertFalse(req.header_items())
+            yield from opener.open(req)
+            self.assertTrue(req.header_items())
+            self.assertTrue(req.has_header('User-agent'))
+            req.add_header('User-Agent','Test-Agent')
+            yield from opener.open(req)
+            self.assertEqual(req.get_header('User-agent'),'Test-Agent')
 
+    @async_test
     def test_sites_no_connection_close(self):
         # Some sites do not send Connection: close header.
         # Verify that those work properly. (#issue12576)
@@ -193,16 +280,16 @@ class OtherNetworkTests(unittest.TestCase):
 
         with support.transient_internet(URL):
             try:
-                with urllib.request.urlopen(URL) as res:
-                    pass
+                res = yield from request.urlopen(URL)
+                pass
             except ValueError as e:
                 self.fail("urlopen failed for site not sending \
                            Connection:close")
             else:
                 self.assertTrue(res)
 
-            req = urllib.request.urlopen(URL)
-            res = req.read()
+            req = yield from request.urlopen(URL)
+            res = yield from req.read()
             self.assertTrue(res)
 
     def _test_urls(self, urls, handlers, retry=True):
@@ -210,9 +297,9 @@ class OtherNetworkTests(unittest.TestCase):
         import logging
         debug = logging.getLogger("test_urllib2").debug
 
-        urlopen = urllib.request.build_opener(*handlers).open
+        urlopen = request.build_opener(*handlers).open
         if retry:
-            urlopen = _wrap_with_retry_thrice(urlopen, urllib.error.URLError)
+            urlopen = yield from _wrap_with_retry_thrice(urlopen, error.URLError)
 
         for url in urls:
             with self.subTest(url=url):
@@ -223,7 +310,7 @@ class OtherNetworkTests(unittest.TestCase):
 
                 with support.transient_internet(url):
                     try:
-                        f = urlopen(url, req, TIMEOUT)
+                        f = yield from urlopen(url, req, TIMEOUT)
                     except OSError as err:
                         if expected_err:
                             msg = ("Didn't get expected error(s) %s for %s %s, got %s: %s" %
@@ -231,7 +318,7 @@ class OtherNetworkTests(unittest.TestCase):
                             self.assertIsInstance(err, expected_err, msg)
                         else:
                             raise
-                    except urllib.error.URLError as err:
+                    except error.URLError as err:
                         if isinstance(err[0], socket.timeout):
                             print("<timeout: %s>" % url, file=sys.stderr)
                             continue
@@ -242,7 +329,7 @@ class OtherNetworkTests(unittest.TestCase):
                             with support.time_out, \
                                  support.socket_peer_reset, \
                                  support.ioerror_peer_reset:
-                                buf = f.read()
+                                buf = yield from f.read()
                                 debug("read %d bytes" % len(buf))
                         except socket.timeout:
                             print("<timeout: %s>" % url, file=sys.stderr)
@@ -252,7 +339,7 @@ class OtherNetworkTests(unittest.TestCase):
     def _extra_handlers(self):
         handlers = []
 
-        cfh = urllib.request.CacheFTPHandler()
+        cfh = request.CacheFTPHandler()
         self.addCleanup(cfh.clear_cache)
         cfh.setTimeout(1)
         handlers.append(cfh)
@@ -261,79 +348,88 @@ class OtherNetworkTests(unittest.TestCase):
 
 
 class TimeoutTest(unittest.TestCase):
+
+    @async_test
     def test_http_basic(self):
         self.assertIsNone(socket.getdefaulttimeout())
         url = "http://www.example.com"
         with support.transient_internet(url, timeout=None):
-            u = _urlopen_with_retry(url)
+            u = yield from _urlopen_with_retry(url)
             self.addCleanup(u.close)
             self.assertIsNone(u.fp.raw._sock.gettimeout())
 
+    @async_test
     def test_http_default_timeout(self):
         self.assertIsNone(socket.getdefaulttimeout())
         url = "http://www.example.com"
         with support.transient_internet(url):
             socket.setdefaulttimeout(60)
             try:
-                u = _urlopen_with_retry(url)
+                u = yield from _urlopen_with_retry(url)
                 self.addCleanup(u.close)
             finally:
                 socket.setdefaulttimeout(None)
             self.assertEqual(u.fp.raw._sock.gettimeout(), 60)
 
+    @async_test
     def test_http_no_timeout(self):
         self.assertIsNone(socket.getdefaulttimeout())
         url = "http://www.example.com"
         with support.transient_internet(url):
             socket.setdefaulttimeout(60)
             try:
-                u = _urlopen_with_retry(url, timeout=None)
+                u = yield from _urlopen_with_retry(url, timeout=None)
                 self.addCleanup(u.close)
             finally:
                 socket.setdefaulttimeout(None)
             self.assertIsNone(u.fp.raw._sock.gettimeout())
 
+    @async_test
     def test_http_timeout(self):
         url = "http://www.example.com"
         with support.transient_internet(url):
-            u = _urlopen_with_retry(url, timeout=120)
+            u = yield from _urlopen_with_retry(url, timeout=120)
             self.addCleanup(u.close)
             self.assertEqual(u.fp.raw._sock.gettimeout(), 120)
 
     FTP_HOST = "ftp://ftp.mirror.nl/pub/gnu/"
 
+    @async_test
     def test_ftp_basic(self):
         self.assertIsNone(socket.getdefaulttimeout())
         with support.transient_internet(self.FTP_HOST, timeout=None):
-            u = _urlopen_with_retry(self.FTP_HOST)
+            u = yield from _urlopen_with_retry(self.FTP_HOST)
             self.addCleanup(u.close)
             self.assertIsNone(u.fp.fp.raw._sock.gettimeout())
 
+    @async_test
     def test_ftp_default_timeout(self):
         self.assertIsNone(socket.getdefaulttimeout())
         with support.transient_internet(self.FTP_HOST):
             socket.setdefaulttimeout(60)
             try:
-                u = _urlopen_with_retry(self.FTP_HOST)
+                u = yield from _urlopen_with_retry(self.FTP_HOST)
                 self.addCleanup(u.close)
             finally:
                 socket.setdefaulttimeout(None)
             self.assertEqual(u.fp.fp.raw._sock.gettimeout(), 60)
 
+    @async_test
     def test_ftp_no_timeout(self):
         self.assertIsNone(socket.getdefaulttimeout())
         with support.transient_internet(self.FTP_HOST):
             socket.setdefaulttimeout(60)
             try:
-                u = _urlopen_with_retry(self.FTP_HOST, timeout=None)
+                u = yield from _urlopen_with_retry(self.FTP_HOST, timeout=None)
                 self.addCleanup(u.close)
             finally:
                 socket.setdefaulttimeout(None)
             self.assertIsNone(u.fp.fp.raw._sock.gettimeout())
 
+    @async_test
     def test_ftp_timeout(self):
         with support.transient_internet(self.FTP_HOST):
-            u = _urlopen_with_retry(self.FTP_HOST, timeout=60)
+            u = yield from _urlopen_with_retry(self.FTP_HOST, timeout=60)
             self.addCleanup(u.close)
             self.assertEqual(u.fp.fp.raw._sock.gettimeout(), 60)
 
