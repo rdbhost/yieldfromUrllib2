@@ -1453,7 +1453,7 @@ class FTPHandler(BaseHandler):
         if dirs and not dirs[0]:
             dirs = dirs[1:]
         try:
-            fw = yield from self.connect_ftp(user, passwd, host, port, dirs, req.timeout)
+            fw = self.connect_ftp(user, passwd, host, port, dirs, req.timeout)
             type = file and 'I' or 'D'
             for attr in attrs:
                 attr, value = splitvalue(attr)
@@ -1473,9 +1473,8 @@ class FTPHandler(BaseHandler):
             exc = URLError('ftp error: %r' % exp)
             raise exc.with_traceback(sys.exc_info()[2])
 
-    @asyncio.coroutine
     def connect_ftp(self, user, passwd, host, port, dirs, timeout):
-        _r = yield from ftpwrapper(user, passwd, host, port, dirs, timeout,
+        _r = ftpwrapper(user, passwd, host, port, dirs, timeout,
                           persistent=False)
         return _r
 
