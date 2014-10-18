@@ -489,18 +489,17 @@ class OpenerDirector:
 
     @asyncio.coroutine
     def _open(self, req, data=None):
+
         result = yield from self._call_chain(self.handle_open, 'default', 'default_open', req)
         if result:
             return result
 
         protocol = req.type
-        result = yield from self._call_chain(self.handle_open, protocol, protocol +
-                                  '_open', req)
+        result = yield from self._call_chain(self.handle_open, protocol, protocol+'_open', req)
         if result:
             return result
 
-        _r = yield from self._call_chain(self.handle_open, 'unknown',
-                                'unknown_open', req)
+        _r = yield from self._call_chain(self.handle_open, 'unknown', 'unknown_open', req)
         return _r
 
     @asyncio.coroutine
@@ -1221,16 +1220,21 @@ class AbstractHTTPHandler(BaseHandler):
             except OSError as err: # timeout error
                 raise URLError(err)
             r = yield from h.getresponse()
-        except:
+
+        except Exception as e:
             h.close()
             raise
 
         # If the server does not send us a 'Connection: close' header,
         # HTTPConnection assumes the socket should be left open. Manually
         # mark the socket to be closed when this response object goes away.
-        if h.sock:
-            h.sock.close()
-            h.sock = None
+
+        # yieldfrom.http.request does not dupe the socket, so this is the
+        # only copy of the socket.  It will be closed when response is done
+        #
+        #if h.sock:
+        #    h.sock.close()
+        #    h.sock = None
 
         r.url = req.get_full_url()
         # This line replaces the .msg attribute of the HTTPResponse

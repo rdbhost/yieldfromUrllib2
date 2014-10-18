@@ -1,7 +1,5 @@
 import unittest
 from test import support
-# from test import test_urllib
-
 import os
 import io
 import socket
@@ -1641,18 +1639,19 @@ class MiscTests(unittest.TestCase):
 
     @unittest.skipUnless(support.is_resource_enabled('network'),
                          'test requires network access')
+    @async_test
     def test_issue16464(self):
         opener = request.build_opener()
-        request = request.Request("http://www.example.com/")
-        self.assertEqual(None, request.data)
+        req = request.Request("http://www.example.com/")
+        self.assertEqual(None, req.data)
 
-        opener.open(request, "1".encode("us-ascii"))
-        self.assertEqual(b"1", request.data)
-        self.assertEqual("1", request.get_header("Content-length"))
+        yield from opener.open(req, "1".encode("us-ascii"))
+        self.assertEqual(b"1", req.data)
+        self.assertEqual("1", req.get_header("Content-length"))
 
-        opener.open(request, "1234567890".encode("us-ascii"))
-        self.assertEqual(b"1234567890", request.data)
-        self.assertEqual("10", request.get_header("Content-length"))
+        yield from opener.open(req, "1234567890".encode("us-ascii"))
+        self.assertEqual(b"1234567890", req.data)
+        self.assertEqual("10", req.get_header("Content-length"))
 
     def test_HTTPError_interface(self):
         """

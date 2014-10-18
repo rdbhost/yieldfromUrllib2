@@ -5,9 +5,9 @@ import asyncio
 import socket
 
 sys.path.insert(1, '..')
+
 import request
 
-#socket.setblocking(False)
 sslContext = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
 
 
@@ -15,9 +15,15 @@ sslContext = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
 @asyncio.coroutine
 def get_py():
     print('start')
-    resp = yield from request.urlopen('http://httpbin.org') #, context=sslContext, timeout=1)
-    print('have resp %s' % len(resp.fp._buffer))
-    pg = yield from resp.read()
+    #resp = yield from request.urlopen('http://httpbin.org', context=sslContext, timeout=5)
+    resp = yield from request.urlopen('https://www.rdbhost.com', context=sslContext, timeout=5)
+    print('eof ', resp.fp.at_eof(), file=sys.stderr)
+
+    try:
+        pg = yield from resp.read()
+    except Exception as e:
+        print('eof1 ', resp.fp, file=sys.stderr)
+        raise
     print(pg.decode('utf-8'))
     return pg
 
