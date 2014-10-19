@@ -4,8 +4,6 @@ from test.test_urllib2 import sanepathname2url
 
 import os
 import socket
-#import urllib.error
-#import urllib.request
 import sys
 import asyncio
 import functools
