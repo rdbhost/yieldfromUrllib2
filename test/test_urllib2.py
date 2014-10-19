@@ -1536,7 +1536,7 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(len(http_handler.requests), 1)
         self.assertFalse(http_handler.requests[0].has_header(auth_header))
 
-    def tst_http_closed(self):
+    def test_http_closed(self):
         """Test the connection is cleaned up when the response is closed"""
         #    conn = test_urllib.fakehttp(header.encode() + data)
 
@@ -1566,7 +1566,7 @@ class HandlerTests(unittest.TestCase):
             _run_with_server(run, header.encode()+data)
 
 
-    def tst_invalid_closed(self):
+    def test_invalid_closed(self):
         """Test the connection is cleaned up after an invalid response"""
 
         def run(host, port):

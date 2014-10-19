@@ -693,7 +693,7 @@ class TestUrlopen(unittest.TestCase):
                          cadefault=True)
 
     # sni not supported by yieldfrom.urllib.requests, because asyncio does not support
-    def tst_https_sni(self):
+    def test_https_sni(self):
         if ssl is None:
             self.skipTest("ssl module required")
         if not ssl.HAS_SNI:
@@ -781,20 +781,21 @@ class TestUrlopen(unittest.TestCase):
                           "http://sadflkjsasf.i.nvali.d./")
 
     @async_test
-    def tst_iteration(self):
+    def test_iteration(self):
         expected_response = b"pycon 2008..."
         handler = self.start_server([(200, [], expected_response)])
         resp = yield from request.urlopen("http://localhost:%s" % handler.port)
         line = yield from resp.read()
-        for line in data:
-            self.assertEqual(line, expected_response)
+        #for line in data:
+        self.assertEqual(line, expected_response)
 
     @async_test
-    def tst_line_iteration(self):
-        lines = [b"We\n", b"got\n", b"here\n", b"verylong " * 8192 + b"\n"]
+    def test_line_iteration(self):
+        lines = [b"We\n", b"got\n", b"here\n", b"verylong " * 192 + b"\n"]
         expected_response = b"".join(lines)
         handler = self.start_server([(200, [], expected_response)])
-        data = yield from request.urlopen("http://localhost:%s" % handler.port)
+        resp = yield from request.urlopen("http://localhost:%s" % handler.port)
+        data = yield from resp.readlines(4)
         for index, line in enumerate(data):
             self.assertEqual(line, lines[index],
                              "Fetched line number %s doesn't match expected:\n"
