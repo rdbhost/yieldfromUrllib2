@@ -15,9 +15,9 @@ sslContext = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
 @asyncio.coroutine
 def get_py():
     print('start')
-    #resp = yield from request.urlopen('http://httpbin.org', context=sslContext, timeout=5)
-    resp = yield from request.urlopen('https://www.rdbhost.com', context=sslContext, timeout=5)
-    print('eof ', resp.fp.at_eof(), file=sys.stderr)
+    resp = yield from request.urlopen('http://httpbin.org', context=sslContext, timeout=5)
+    #resp = yield from request.urlopen('https://www.rdbhost.com', context=sslContext, timeout=5)
+    #print('eof ', resp.fp.at_eof(), file=sys.stderr)
 
     try:
         pg = yield from resp.read()
