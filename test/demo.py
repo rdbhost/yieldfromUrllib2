@@ -6,7 +6,7 @@ import socket
 
 sys.path.insert(1, '..')
 
-import request
+from yieldfrom.urllib import request
 
 sslContext = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
 

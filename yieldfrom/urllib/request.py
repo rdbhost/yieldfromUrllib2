@@ -103,7 +103,6 @@ import asyncio
 
 from yieldfrom.http import client
 
-sys.path.append('..')
 from error import URLError, HTTPError, ContentTooShortError
 from parse import (
     urlparse, urlsplit, urljoin, unwrap, quote, unquote,

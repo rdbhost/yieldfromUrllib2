@@ -14,14 +14,14 @@ import functools
 import asyncio
 import socket
 
-sys.path.insert(0, '..')
-import parse
-import request
-import error
+sys.path.insert(1, '../yieldfrom/urllib')
+import parse as parse
+import request as request
+import error as error
 
 sys.path.append('.')
 import testtcpserver as server
-from testtcpserver import RECEIVE, FauxSocket
+from testtcpserver import RECEIVE, TestingSocket
 
 from nturl2path import url2pathname, pathname2url
 

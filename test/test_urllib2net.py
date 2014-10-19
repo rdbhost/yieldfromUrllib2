@@ -14,7 +14,7 @@ try:
 except ImportError:
     ssl = None
 
-sys.path.insert(0, '..')
+sys.path.insert(0, '../yieldfrom/urllib')
 import error
 import request
 

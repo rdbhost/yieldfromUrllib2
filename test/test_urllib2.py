@@ -8,7 +8,7 @@ import sys
 import asyncio
 import functools
 
-sys.path.insert(0, '.')
+sys.path.insert(0, '../yieldfrom/urllib')
 #import urllib.request
 import request
 # The proxy bypass method imported below has logic specific to the OSX

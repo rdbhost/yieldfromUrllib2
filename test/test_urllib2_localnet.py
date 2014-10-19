@@ -12,10 +12,10 @@ import functools
 import sys
 import socket
 
-sys.path.insert(0, '..')
-import parse
-import request
-import error
+sys.path.insert(1, '../yieldfrom/urllib/')
+import parse as parse
+import request as request
+import error as error
 
 from test import support
 
